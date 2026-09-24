@@ -47,8 +47,9 @@ async function sendTelegramMessage(botToken, chatId, text) {
   }
 }
 
-// 🛡️ 精准清理干扰弹窗
+// 🛡️ 稳健清理干扰弹窗（彻底防空指针崩溃）
 async function forceDismissPopups(page) {
+  // 1. 关闭 Cookie 协议栏
   try {
     const cookieBtn = page.locator('button:has-text("Accept all"), button:has-text("Reject all")').first();
     if (await cookieBtn.isVisible({ timeout: 400 })) {
@@ -56,63 +57,63 @@ async function forceDismissPopups(page) {
     }
   } catch (e) {}
 
-  try {
-    const isInterferingModalVisible = await page.evaluate(() => {
-      const txt = document.body.innerText || '';
-      return (
-        txt.includes('How would you rate FreeMCHost') ||
-        txt.includes('Your feedback') ||
-        txt.includes('Got an idea to make FreeMCHost better') ||
-        txt.includes('Get Free+ (2GB)') ||
-        txt.includes('Upgrade to Free+') ||
-        txt.includes('Join the FreeMCHost community')
-      );
-    });
-
-    if (isInterferingModalVisible) {
+  // 2. 连续尝试点击可见的 Maybe later
+  for (let i = 0; i < 2; i++) {
+    try {
       const maybeLater = page.locator('button, a, span, div').filter({ hasText: /^Maybe later$/i }).first();
-      if (await maybeLater.isVisible({ timeout: 500 })) {
+      if (await maybeLater.isVisible({ timeout: 400 })) {
         await maybeLater.click({ force: true });
         console.log('🛡️ 已点击 [Maybe later] 关闭干扰弹窗');
         await page.waitForTimeout(300);
       }
-    }
-  } catch (e) {}
+    } catch (e) {}
+  }
 
-  await page.evaluate(() => {
-    const allEls = Array.from(document.querySelectorAll('*'));
-    const noiseHeaders = allEls.filter(el => {
-      const txt = el.textContent || '';
-      return (
-        txt.includes('How would you rate FreeMCHost') ||
-        txt.includes('Your feedback') ||
-        txt.includes('Got an idea to make FreeMCHost better') ||
-        txt.includes('Get Free+ (2GB)') ||
-        txt.includes('Upgrade to Free+') ||
-        txt.includes('Join the FreeMCHost community')
-      );
-    });
+  // 3. 原生 DOM 移除干扰模态框（安全链，杜绝 null 异常）
+  try {
+    await page.evaluate(() => {
+      const allEls = Array.from(document.querySelectorAll('*'));
+      const noiseHeaders = allEls.filter(el => {
+        const txt = el?.textContent || '';
+        return (
+          txt.includes('How would you rate FreeMCHost') ||
+          txt.includes('Your feedback') ||
+          txt.includes('Got an idea to make FreeMCHost better') ||
+          txt.includes('Get Free+ (2GB)') ||
+          txt.includes('Upgrade to Free+') ||
+          txt.includes('Join the FreeMCHost community')
+        );
+      });
 
-    noiseHeaders.forEach(header => {
-      let container = header;
-      for (let i = 0; i < 7; i++) {
-        if (container.parentElement && container.parentElement !== document.body) {
-          if (container.innerText && container.innerText.includes('Keep your server online')) {
-            return;
+      noiseHeaders.forEach(header => {
+        let container = header;
+        for (let i = 0; i < 7; i++) {
+          if (container && container.parentElement && container.parentElement !== document.body) {
+            const pText = container.parentElement.innerText || '';
+            if (pText.includes('Keep your server online')) {
+              return;
+            }
+            container = container.parentElement;
           }
-          container = container.parentElement;
         }
-      }
-      if (container && container !== document.body && !container.innerText.includes('Keep your server online')) {
-        container.remove();
-      }
-    });
+        if (container && container !== document.body) {
+          const cText = container.innerText || '';
+          if (!cText.includes('Keep your server online')) {
+            container.remove();
+          }
+        }
+      });
 
-    const backdrops = allEls.filter(el => 
-      el.classList && el.classList.contains('fixed') && el.classList.contains('inset-0') && el.getAttribute('data-state') === 'open'
-    );
-    backdrops.forEach(b => b.remove());
-  });
+      const backdrops = allEls.filter(el => 
+        el?.classList && el.classList.contains('fixed') && el.classList.contains('inset-0') && el.getAttribute('data-state') === 'open'
+      );
+      backdrops.forEach(b => {
+        if (!b?.innerText?.includes('Keep your server online')) {
+          b.remove();
+        }
+      });
+    });
+  } catch (e) {}
 
   await page.waitForTimeout(200);
 }
@@ -133,30 +134,50 @@ async function safeFill(page, locator, value, label) {
   }
 }
 
-// 切换至 PLAN Billing 标签页
+// 强制切换至 PLAN Billing 标签页（增加多次尝试与确认机制）
 async function switchToBillingTab(page) {
-  const tabCandidates = page.locator('button, a, div[role="tab"]').filter({ hasText: /Billing/i });
-  const count = await tabCandidates.count();
-  for (let idx = 0; idx < count; idx++) {
-    const item = tabCandidates.nth(idx);
-    if (await item.isVisible().catch(() => false)) {
-      const txt = await item.innerText().catch(() => '');
-      if (!txt.includes('Total') && (txt.includes('Billing') || txt.includes('PLAN'))) {
-        await item.click({ force: true });
-        console.log(`👉 已点击标签: [${txt.replace(/\n/g, ' ')}]`);
-        break;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await forceDismissPopups(page);
+    
+    const tabCandidates = page.locator('button, a, div[role="tab"]').filter({ hasText: /Billing/i });
+    const count = await tabCandidates.count();
+    let clicked = false;
+    
+    for (let idx = 0; idx < count; idx++) {
+      const item = tabCandidates.nth(idx);
+      if (await item.isVisible().catch(() => false)) {
+        const txt = await item.innerText().catch(() => '');
+        if (!txt.includes('Total') && (txt.includes('Billing') || txt.includes('PLAN'))) {
+          await item.click({ force: true });
+          console.log(`👉 已点击标签: [${txt.replace(/\n/g, ' ')}] (尝试 ${attempt + 1})`);
+          clicked = true;
+          break;
+        }
       }
     }
+
+    await page.waitForTimeout(2000);
+    await forceDismissPopups(page);
+
+    // 检查页面是否成功渲染出了 Plan & lifecycle 区域或 Renew now 按钮
+    const hasBillingContent = await page.evaluate(() => {
+      const text = document.body.innerText || '';
+      return text.includes('Plan & lifecycle') || text.includes('TIME UNTIL EXPIRY') || text.includes('Renew now');
+    });
+
+    if (hasBillingContent) {
+      console.log('✅ 成功确认已切换至 PLAN Billing 界面！');
+      return;
+    }
+    console.log('⚠️ 尚未检测到 Billing 面板内容，准备重试点击...');
   }
-  await page.waitForTimeout(2500);
-  await forceDismissPopups(page);
 }
 
 // 倒计时提取器
 async function extractExpiryTime(page) {
   return await page.evaluate(() => {
     const allEls = Array.from(document.querySelectorAll('*'));
-    const header = allEls.find(el => el.textContent && el.textContent.trim().toUpperCase() === 'TIME UNTIL EXPIRY');
+    const header = allEls.find(el => el && el.textContent && el.textContent.trim().toUpperCase() === 'TIME UNTIL EXPIRY');
 
     if (header) {
       let container = header.parentElement;
@@ -192,7 +213,7 @@ async function safeScreenshot(page, filePath) {
   try {
     await page.screenshot({ path: filePath, fullPage: false, timeout: 5000 });
   } catch (e) {
-    console.log(`⚠️ 截图生成跳过: ${e.message}`);
+    console.log(`⚠️ 截图跳过: ${e.message}`);
   }
 }
 
@@ -238,24 +259,6 @@ async function safeScreenshot(page, filePath) {
   });
 
   const page = await context.newPage();
-
-  // 📡 全量拦截并打印除静态资源外的所有网络请求，观察真实 API 端点
-  page.on('request', req => {
-    const url = req.url();
-    const type = req.resourceType();
-    if (['xhr', 'fetch'].includes(type) && !url.includes('google') && !url.includes('analytics')) {
-      console.log(`📤 发起网络请求: [${req.method()}] ${url.substring(0, 100)}`);
-    }
-  });
-
-  page.on('response', res => {
-    const req = res.request();
-    const url = res.url();
-    const type = req.resourceType();
-    if (['xhr', 'fetch'].includes(type) && !url.includes('google') && !url.includes('analytics')) {
-      console.log(`📥 收到网络响应: [${res.status()}] ${url.substring(0, 100)}`);
-    }
-  });
 
   let reports = [];
 
@@ -328,21 +331,20 @@ async function safeScreenshot(page, filePath) {
             await page.waitForTimeout(1200);
           }
 
-          console.log('👉 执行【高精度多层真实事件穿透点击】...');
+          console.log('👉 发起高精度全事件链点击 [60 hours]...');
 
-          // 核心加固：直接在浏览器内部定位包含 60 hours 的卡片，并派发全套鼠标/指针事件链
-          const clickedTarget = await page.evaluate(() => {
+          // 核心：全套 Pointer / Mouse 事件派发 + 内外层贯通
+          await page.evaluate(() => {
             const allEls = Array.from(document.querySelectorAll('*'));
             const textEl = allEls.find(el => 
-              el.children.length === 0 && 
+              el && el.children.length === 0 && 
               el.textContent.trim().toLowerCase().includes('60 hours')
             );
-            if (!textEl) return '未找到文本节点';
+            if (!textEl) return;
 
-            // 寻找带有边框或卡片样式的交互祖先
             let card = textEl;
             for (let j = 0; j < 6; j++) {
-              if (card.parentElement && card.parentElement !== document.body) {
+              if (card && card.parentElement && card.parentElement !== document.body) {
                 const cls = (card.parentElement.className || '').toString();
                 if (cls.includes('rounded') || cls.includes('border') || card.parentElement.tagName === 'BUTTON') {
                   card = card.parentElement;
@@ -352,12 +354,12 @@ async function safeScreenshot(page, filePath) {
               }
             }
 
-            // 完整派发 pointerdown -> mousedown -> focus -> mouseup -> click
+            if (!card) return;
             const rect = card.getBoundingClientRect();
             const clientX = rect.left + rect.width / 2;
             const clientY = rect.top + rect.height / 2;
-
             const opts = { bubbles: true, cancelable: true, view: window, clientX, clientY };
+
             card.dispatchEvent(new PointerEvent('pointerdown', opts));
             card.dispatchEvent(new MouseEvent('mousedown', opts));
             card.focus();
@@ -365,37 +367,28 @@ async function safeScreenshot(page, filePath) {
             card.dispatchEvent(new MouseEvent('mouseup', opts));
             card.dispatchEvent(new MouseEvent('click', opts));
 
-            // 如果内部有真正的 button 或 radio input，也顺带触发一次
             const innerBtn = card.querySelector('button, input');
             if (innerBtn) {
               innerBtn.click();
             }
-
-            return `已触发卡片标签: <${card.tagName.toLowerCase()}> 类名: ${card.className.substring(0, 50)}`;
           });
 
-          console.log(`🖱️ 穿透结果: ${clickedTarget}`);
-
-          // 辅以 Playwright 原生物理鼠标点击（双保险）
+          // Playwright 原生点击辅助
           try {
             const locatorCard = renewModal.locator('div, button').filter({ hasText: /60\s*hours/i }).last();
             if (await locatorCard.isVisible()) {
               await locatorCard.click({ force: true, delay: 100 });
-              console.log('🖱️ 原生 locator.click 派发成功！');
             }
           } catch (e) {}
 
-          // 等待接口交互与入库
-          console.log('⏳ 等待服务端完成网络通信与入账 (10 秒)...');
+          console.log('⏳ 点击已派发，等待服务端 _serverFn RPC 处理 (10 秒)...');
           await page.waitForTimeout(10000);
-
-          // 关掉可能随后弹出的 Discord 推广弹窗
           await forceDismissPopups(page);
 
-          // 核心硬核验：打开全新无缓存页面进行数据库落地确认
+          // 核心硬核验：打开全新标签页向服务端拉取落地数据
           console.log('🔍 正在启动跨上下文硬核验，核查真实入库倒计时...');
           const verifyPage = await context.newPage();
-          await verifyPage.goto(currentUrl, { waitUntil: 'networkidle', timeout: 60000 });
+          await verifyPage.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
           await verifyPage.waitForTimeout(2000);
           await forceDismissPopups(verifyPage);
 
@@ -412,7 +405,6 @@ async function safeScreenshot(page, filePath) {
 
           console.log(`⏱️ 全新页面核验结果: 前序 ${remainHours.toFixed(1)}h ➔ 真实数据库时间: ${finalHours.toFixed(1)}h (${finalStr})`);
 
-          // 只有真实数据增加了 20 小时以上才算入库
           if (finalHours > remainHours + 20) {
             console.log('🎉 验证通过：后端数据库已落盘！');
             reports.push(`🟢 <b>服务器 ${sIndex}</b>: 成功满血续期 (+60h)\n     └ 状态: ${remainStr} ➔ <b>${finalStr}</b>`);
