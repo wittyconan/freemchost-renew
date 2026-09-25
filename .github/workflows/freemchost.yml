@@ -2,7 +2,8 @@ name: Freemchost Auto Renew Permanent
 
 on:
   schedule:
-    - cron: '10 */6 * * *'
+    # 每天固定执行 2 次：北京时间 08:30 (UTC 00:30) 与 20:30 (UTC 12:30)
+    - cron: '30 0,12 * * *'
   workflow_dispatch:
 
 permissions:
@@ -12,7 +13,7 @@ permissions:
 jobs:
   browser-auto-renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       NODE_LINK: ${{ secrets.NODE_LINK }}
 
@@ -36,7 +37,8 @@ jobs:
         run: |
           npm init -y
           npm install playwright js-yaml
-          npx playwright install chromium --with-deps
+          # 核心优化：仅下载 Chromium 引擎，避免 apt 字体源拥堵超时
+          npx playwright install chromium
 
       - name: ⚙️ 部署 Mihomo 代理内核 (双引擎全协议支持)
         if: ${{ env.NODE_LINK != '' }}
